@@ -1,0 +1,597 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Mexico Trip Expense Tracker</title>
+  <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
+  <!-- Firebase App (the core Firebase SDK) -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/firebase/9.23.0/firebase-app-compat.min.js"></script>
+  <!-- Firebase Realtime Database -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/firebase/9.23.0/firebase-database-compat.min.js"></script>
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const MexicoTripExpenseTracker = () => {
+      const [firebaseInitialized, setFirebaseInitialized] = React.useState(false);
+      const [tripId, setTripId] = React.useState('');
+      const [newTripName, setNewTripName] = React.useState('');
+      const [tripCreated, setTripCreated] = React.useState(false);
+      const [loading, setLoading] = React.useState(false);
+      const [error, setError] = React.useState(null);
+      const [exchangeRate, setExchangeRate] = React.useState(0.05);
+      const [expenses, setExpenses] = React.useState([]);
+      const [newExpense, setNewExpense] = React.useState({
+        date: new Date().toISOString().split('T')[0],
+        description: '',
+        amount: '',
+        currency: 'MXN',
+        paidBy: 'me',
+        split: '50-50'
+      });
+      const [names, setNames] = React.useState({
+        me: 'Me',
+        friend: 'Friend'
+      });
+
+      // Initialize Firebase
+      React.useEffect(() => {
+        const initFirebase = () => {
+          // Your Firebase configuration - REPLACE WITH YOUR ACTUAL FIREBASE CONFIG
+          const firebaseConfig = {
+            apiKey: "YOUR_API_KEY",
+            authDomain: "YOUR_PROJECT_ID.firebaseapp.com",
+            databaseURL: "https://YOUR_PROJECT_ID.firebaseio.com",
+            projectId: "YOUR_PROJECT_ID",
+            storageBucket: "YOUR_PROJECT_ID.appspot.com",
+            messagingSenderId: "YOUR_MESSAGING_SENDER_ID",
+            appId: "YOUR_APP_ID"
+          };
+
+          // Initialize Firebase if not already initialized
+          if (!firebase.apps.length) {
+            firebase.initializeApp(firebaseConfig);
+          }
+          setFirebaseInitialized(true);
+        };
+
+        try {
+          initFirebase();
+        } catch (error) {
+          console.error("Error initializing Firebase:", error);
+          setError("Failed to initialize Firebase. Please check your configuration.");
+        }
+      }, []);
+
+      // Create a new trip
+      const createNewTrip = () => {
+        if (!newTripName.trim()) {
+          setError("Please enter a trip name.");
+          return;
+        }
+
+        setLoading(true);
+        setError(null);
+
+        const tripsRef = firebase.database().ref('trips');
+        const newTripRef = tripsRef.push();
+        
+        const tripData = {
+          name: newTripName,
+          createdAt: new Date().toISOString(),
+          exchangeRate: exchangeRate,
+          names: names,
+          expenses: {}
+        };
+
+        newTripRef.set(tripData)
+          .then(() => {
+            setTripId(newTripRef.key);
+            setTripCreated(true);
+            setLoading(false);
+            
+            // Start listening for expense updates
+            listenForExpenses(newTripRef.key);
+          })
+          .catch(error => {
+            console.error("Error creating trip:", error);
+            setError("Failed to create trip. Please try again.");
+            setLoading(false);
+          });
+      };
+
+      // Join an existing trip
+      const joinTrip = () => {
+        if (!tripId.trim()) {
+          setError("Please enter a trip ID.");
+          return;
+        }
+
+        setLoading(true);
+        setError(null);
+
+        const tripRef = firebase.database().ref(`trips/${tripId}`);
+        
+        tripRef.once('value')
+          .then(snapshot => {
+            if (snapshot.exists()) {
+              const tripData = snapshot.val();
+              setNewTripName(tripData.name);
+              setExchangeRate(tripData.exchangeRate || 0.05);
+              setNames(tripData.names || { me: 'Me', friend: 'Friend' });
+              setTripCreated(true);
+              
+              // Start listening for expense updates
+              listenForExpenses(tripId);
+            } else {
+              setError("Trip not found. Please check the ID.");
+            }
+            setLoading(false);
+          })
+          .catch(error => {
+            console.error("Error joining trip:", error);
+            setError("Failed to join trip. Please try again.");
+            setLoading(false);
+          });
+      };
+
+      // Listen for expense updates
+      const listenForExpenses = (tripId) => {
+        const expensesRef = firebase.database().ref(`trips/${tripId}/expenses`);
+        
+        expensesRef.on('value', snapshot => {
+          const expensesData = snapshot.val();
+          if (expensesData) {
+            const expensesArray = Object.keys(expensesData).map(key => ({
+              id: key,
+              ...expensesData[key]
+            }));
+            setExpenses(expensesArray);
+          } else {
+            setExpenses([]);
+          }
+        });
+
+        // Listen for name and exchange rate updates
+        const tripRef = firebase.database().ref(`trips/${tripId}`);
+        tripRef.on('value', snapshot => {
+          const tripData = snapshot.val();
+          if (tripData) {
+            setExchangeRate(tripData.exchangeRate || exchangeRate);
+            setNames(tripData.names || names);
+          }
+        });
+      };
+
+      // Calculate totals
+      const calculateTotals = () => {
+        let totalMXN = 0;
+        let totalUSD = 0;
+        let iOweFriend = 0;
+        let friendOwesMe = 0;
+        
+        expenses.forEach(expense => {
+          const amountMXN = expense.currency === 'MXN' ? Number(expense.amount) : Number(expense.amount) / exchangeRate;
+          const amountUSD = expense.currency === 'USD' ? Number(expense.amount) : Number(expense.amount) * exchangeRate;
+          
+          totalMXN += amountMXN;
+          totalUSD += amountUSD;
+          
+          // Calculate who owes who based on payment and split
+          if (expense.paidBy === 'me') {
+            if (expense.split === '50-50') {
+              friendOwesMe += amountUSD / 2;
+            } else if (expense.split === 'friend') {
+              friendOwesMe += amountUSD;
+            }
+          } else {
+            if (expense.split === '50-50') {
+              iOweFriend += amountUSD / 2;
+            } else if (expense.split === 'me') {
+              iOweFriend += amountUSD;
+            }
+          }
+        });
+        
+        return {
+          totalMXN: totalMXN.toFixed(2),
+          totalUSD: totalUSD.toFixed(2),
+          balance: (friendOwesMe - iOweFriend).toFixed(2)
+        };
+      };
+      
+      // Handle adding a new expense
+      const addExpense = () => {
+        if (!newExpense.description || !newExpense.amount) return;
+        
+        const expensesRef = firebase.database().ref(`trips/${tripId}/expenses`);
+        const newExpenseRef = expensesRef.push();
+        
+        newExpenseRef.set({
+          ...newExpense,
+          timestamp: new Date().toISOString()
+        })
+          .then(() => {
+            setNewExpense({
+              date: new Date().toISOString().split('T')[0],
+              description: '',
+              amount: '',
+              currency: 'MXN',
+              paidBy: 'me',
+              split: '50-50'
+            });
+          })
+          .catch(error => {
+            console.error("Error adding expense:", error);
+            setError("Failed to add expense. Please try again.");
+          });
+      };
+      
+      // Handle deleting an expense
+      const deleteExpense = (id) => {
+        const expenseRef = firebase.database().ref(`trips/${tripId}/expenses/${id}`);
+        
+        expenseRef.remove()
+          .catch(error => {
+            console.error("Error deleting expense:", error);
+            setError("Failed to delete expense. Please try again.");
+          });
+      };
+      
+      // Update input fields
+      const handleInputChange = (e) => {
+        const { name, value } = e.target;
+        setNewExpense({...newExpense, [name]: value});
+      };
+      
+      // Update names
+      const handleNameChange = (e) => {
+        const { name, value } = e.target;
+        const updatedNames = {...names, [name]: value};
+        setNames(updatedNames);
+        
+        // Update names in Firebase
+        if (tripCreated) {
+          firebase.database().ref(`trips/${tripId}/names`).set(updatedNames);
+        }
+      };
+      
+      // Update exchange rate
+      const handleExchangeRateChange = (e) => {
+        const value = Number(e.target.value);
+        setExchangeRate(value);
+        
+        // Update exchange rate in Firebase
+        if (tripCreated) {
+          firebase.database().ref(`trips/${tripId}/exchangeRate`).set(value);
+        }
+      };
+      
+      // Copy trip ID to clipboard
+      const copyTripId = () => {
+        navigator.clipboard.writeText(tripId)
+          .then(() => {
+            alert("Trip ID copied to clipboard!");
+          })
+          .catch(err => {
+            console.error('Could not copy text: ', err);
+            alert("Failed to copy. Please select and copy the ID manually.");
+          });
+      };
+
+      const totals = calculateTotals();
+
+      // Render the trip setup screen if not created yet
+      if (!tripCreated) {
+        return (
+          <div className="max-w-md mx-auto p-4 bg-gray-50 rounded-lg shadow mt-10">
+            <h1 className="text-2xl font-bold text-center mb-6">Mexico Trip Expense Tracker</h1>
+            
+            {error && (
+              <div className="mb-4 p-3 bg-red-100 text-red-700 rounded">
+                {error}
+              </div>
+            )}
+            
+            <div className="mb-6 p-4 bg-white rounded shadow">
+              <h2 className="text-lg font-semibold mb-3">Create New Trip</h2>
+              <div className="mb-3">
+                <label className="block text-sm font-medium text-gray-700 mb-1">Trip Name</label>
+                <input
+                  type="text"
+                  value={newTripName}
+                  onChange={(e) => setNewTripName(e.target.value)}
+                  className="w-full p-2 border rounded"
+                  placeholder="Spring Break 2025"
+                />
+              </div>
+              <button 
+                onClick={createNewTrip}
+                disabled={loading || !firebaseInitialized}
+                className="w-full bg-blue-500 hover:bg-blue-600 text-white py-2 px-4 rounded disabled:bg-blue-300"
+              >
+                {loading ? "Creating..." : "Create New Trip"}
+              </button>
+            </div>
+            
+            <div className="p-4 bg-white rounded shadow">
+              <h2 className="text-lg font-semibold mb-3">Join Existing Trip</h2>
+              <div className="mb-3">
+                <label className="block text-sm font-medium text-gray-700 mb-1">Trip ID</label>
+                <input
+                  type="text"
+                  value={tripId}
+                  onChange={(e) => setTripId(e.target.value)}
+                  className="w-full p-2 border rounded"
+                  placeholder="Enter the trip ID shared by your friend"
+                />
+              </div>
+              <button 
+                onClick={joinTrip}
+                disabled={loading || !firebaseInitialized}
+                className="w-full bg-green-500 hover:bg-green-600 text-white py-2 px-4 rounded disabled:bg-green-300"
+              >
+                {loading ? "Joining..." : "Join Trip"}
+              </button>
+            </div>
+            
+            {!firebaseInitialized && (
+              <div className="mt-4 p-3 bg-yellow-100 text-yellow-700 rounded">
+                Initializing Firebase... This may take a moment.
+              </div>
+            )}
+          </div>
+        );
+      }
+
+      // Render the main expense tracker once trip is created/joined
+      return (
+        <div className="max-w-4xl mx-auto p-4 bg-gray-50 rounded-lg shadow">
+          <h1 className="text-2xl font-bold text-center mb-2">{newTripName}</h1>
+          <p className="text-center mb-6 text-sm">
+            Trip ID: <span className="font-mono bg-gray-100 px-2 py-1 rounded">{tripId}</span>
+            <button 
+              onClick={copyTripId}
+              className="ml-2 text-blue-500 hover:text-blue-700 text-sm"
+            >
+              Copy
+            </button>
+          </p>
+          
+          {error && (
+            <div className="mb-4 p-3 bg-red-100 text-red-700 rounded">
+              {error}
+            </div>
+          )}
+          
+          {/* Names and Exchange Rate */}
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6 p-4 bg-white rounded shadow">
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Your Name</label>
+              <input
+                type="text"
+                name="me"
+                value={names.me}
+                onChange={handleNameChange}
+                className="w-full p-2 border rounded"
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Friend's Name</label>
+              <input
+                type="text"
+                name="friend"
+                value={names.friend}
+                onChange={handleNameChange}
+                className="w-full p-2 border rounded"
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Exchange Rate (1 MXN to USD)</label>
+              <input
+                type="number"
+                value={exchangeRate}
+                onChange={handleExchangeRateChange}
+                className="w-full p-2 border rounded"
+                step="0.001"
+              />
+            </div>
+          </div>
+          
+          {/* Add New Expense */}
+          <div className="mb-6 p-4 bg-white rounded shadow">
+            <h2 className="text-lg font-semibold mb-3">Add New Expense</h2>
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-6 gap-3">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Date</label>
+                <input
+                  type="date"
+                  name="date"
+                  value={newExpense.date}
+                  onChange={handleInputChange}
+                  className="w-full p-2 border rounded"
+                />
+              </div>
+              <div className="lg:col-span-2">
+                <label className="block text-sm font-medium text-gray-700 mb-1">Description</label>
+                <input
+                  type="text"
+                  name="description"
+                  value={newExpense.description}
+                  onChange={handleInputChange}
+                  className="w-full p-2 border rounded"
+                  placeholder="Dinner, Taxi, etc."
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Amount</label>
+                <input
+                  type="number"
+                  name="amount"
+                  value={newExpense.amount}
+                  onChange={handleInputChange}
+                  className="w-full p-2 border rounded"
+                  step="0.01"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Currency</label>
+                <select
+                  name="currency"
+                  value={newExpense.currency}
+                  onChange={handleInputChange}
+                  className="w-full p-2 border rounded"
+                >
+                  <option value="MXN">MXN (Pesos)</option>
+                  <option value="USD">USD (Dollars)</option>
+                </select>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Paid By</label>
+                <select
+                  name="paidBy"
+                  value={newExpense.paidBy}
+                  onChange={handleInputChange}
+                  className="w-full p-2 border rounded"
+                >
+                  <option value="me">{names.me}</option>
+                  <option value="friend">{names.friend}</option>
+                </select>
+              </div>
+            </div>
+            
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mt-3">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Split</label>
+                <select
+                  name="split"
+                  value={newExpense.split}
+                  onChange={handleInputChange}
+                  className="w-full p-2 border rounded"
+                >
+                  <option value="50-50">Split 50/50</option>
+                  <option value="me">Just {names.me}</option>
+                  <option value="friend">Just {names.friend}</option>
+                </select>
+              </div>
+              <div className="flex items-end">
+                <button 
+                  onClick={addExpense}
+                  className="w-full bg-blue-500 hover:bg-blue-600 text-white py-2 px-4 rounded"
+                >
+                  Add Expense
+                </button>
+              </div>
+            </div>
+          </div>
+          
+          {/* Expenses List */}
+          <div className="mb-6 p-4 bg-white rounded shadow overflow-x-auto">
+            <h2 className="text-lg font-semibold mb-3">Expenses</h2>
+            {expenses.length === 0 ? (
+              <p className="text-gray-500 italic">No expenses added yet.</p>
+            ) : (
+              <table className="w-full border-collapse">
+                <thead>
+                  <tr className="bg-gray-100">
+                    <th className="p-2 text-left">Date</th>
+                    <th className="p-2 text-left">Description</th>
+                    <th className="p-2 text-right">Amount</th>
+                    <th className="p-2 text-left">Paid By</th>
+                    <th className="p-2 text-left">Split</th>
+                    <th className="p-2 text-right">USD</th>
+                    <th className="p-2"></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {expenses.map(expense => {
+                    const amountUSD = expense.currency === 'USD' 
+                      ? Number(expense.amount) 
+                      : Number(expense.amount) * exchangeRate;
+                    
+                    return (
+                      <tr key={expense.id} className="border-t">
+                        <td className="p-2">{expense.date}</td>
+                        <td className="p-2">{expense.description}</td>
+                        <td className="p-2 text-right">
+                          {Number(expense.amount).toFixed(2)} {expense.currency}
+                        </td>
+                        <td className="p-2">{expense.paidBy === 'me' ? names.me : names.friend}</td>
+                        <td className="p-2">
+                          {expense.split === '50-50' 
+                            ? '50/50' 
+                            : expense.split === 'me' 
+                              ? names.me 
+                              : names.friend}
+                        </td>
+                        <td className="p-2 text-right">${amountUSD.toFixed(2)}</td>
+                        <td className="p-2">
+                          <button 
+                            onClick={() => deleteExpense(expense.id)}
+                            className="text-red-500 hover:text-red-700"
+                          >
+                            Delete
+                          </button>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            )}
+          </div>
+          
+          {/* Summary */}
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+            <div className="p-4 bg-white rounded shadow">
+              <h3 className="text-md font-semibold mb-2">Total Expenses</h3>
+              <p className="text-lg">
+                ${totals.totalUSD} USD
+              </p>
+              <p className="text-md text-gray-600">
+                {totals.totalMXN} MXN
+              </p>
+            </div>
+            
+            <div className="p-4 bg-white rounded shadow md:col-span-2">
+              <h3 className="text-md font-semibold mb-2">Balance</h3>
+              {Number(totals.balance) > 0 ? (
+                <p className="text-lg text-green-600">
+                  {names.friend} owes {names.me} <strong>${Math.abs(Number(totals.balance)).toFixed(2)}</strong>
+                </p>
+              ) : Number(totals.balance) < 0 ? (
+                <p className="text-lg text-red-600">
+                  {names.me} owes {names.friend} <strong>${Math.abs(Number(totals.balance)).toFixed(2)}</strong>
+                </p>
+              ) : (
+                <p className="text-lg text-gray-600">All settled up!</p>
+              )}
+            </div>
+          </div>
+          
+          <div className="p-4 bg-blue-50 rounded shadow">
+            <h3 className="font-semibold mb-2">How to Share</h3>
+            <p className="mb-2">Share this Trip ID with your friend so they can join the trip:</p>
+            <div className="flex items-center">
+              <code className="bg-white p-2 rounded border flex-1 font-mono">{tripId}</code>
+              <button 
+                onClick={copyTripId}
+                className="ml-2 bg-blue-500 hover:bg-blue-600 text-white py-2 px-4 rounded"
+              >
+                Copy ID
+              </button>
+            </div>
+          </div>
+        </div>
+      );
+    };
+
+    ReactDOM.render(<MexicoTripExpenseTracker />, document.getElementById('root'));
+  </script>
+</body>
+</html>
